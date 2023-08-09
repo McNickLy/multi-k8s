@@ -1,0 +1,72 @@
+name: Deploy MultiK8s
+on:
+  push:
+    branches:
+      - main
+
+env:
+  SHA: $(git rev-parse HEAD)
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set Service Key
+        uses: "google-github-actions/auth@v0"
+        with:
+          credentials_json: "${{ secrets.GKE_SA_KEY }}"
+
+      - name: Set Project
+        uses: google-github-actions/setup-gcloud@v0
+        with:
+          project_id: multi-395415
+
+      - name: Auth
+        run: |-
+          gcloud --quiet auth configure-docker
+
+      - name: Get Credentials
+        uses: google-github-actions/get-gke-credentials@v0
+        with:
+          cluster_name: multi-cluster
+          location: us-central1-c
+
+      - name: Login to Docker CLI
+        run: |-
+          docker login -u ${{ secrets.DOCKER_USERNAME }} -p ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Build the 'test' version of multi-client
+        run: |-
+          docker build -t mcnickly/react-test -f ./client/Dockerfile.dev ./client
+
+      - name: Run tests
+        run: |-
+          docker run -e CI=true mcnickly/react-test npm test
+
+      - name: Build all our images and tag each one
+        run: |-
+          docker build -t mcnickly/multi-client:latest -t mcnickly/multi-client:${{ env.SHA }} -f ./client/Dockerfile ./client
+          docker build -t mcnickly/multi-server:latest -t mcnickly/multi-server:${{ env.SHA }} -f ./server/Dockerfile ./server
+          docker build -t mcnickly/multi-worker:latest -t mcnickly/multi-worker:${{ env.SHA }} -f ./worker/Dockerfile ./worker
+
+      - name: Push images to docker hub
+        run: |-
+          docker push mcnickly/multi-client:latest
+          docker push mcnickly/multi-server:latest
+          docker push mcnickly/multi-worker:latest
+
+          docker push mcnickly/multi-client:${{ env.SHA }}
+          docker push mcnickly/multi-server:${{ env.SHA }}
+          docker push mcnickly/multi-worker:${{ env.SHA }}
+
+      - name: Apply all configs in k8s folder
+        run: |-
+          kubectl apply -f k8s
+
+      - name: Imperatively set latest images on each deployment
+        run: |-
+          kubectl set image deployments/server-deployment server=mcnickly/multi-server:${{ env.SHA }}
+          kubectl set image deployments/client-deployment client=mcnickly/multi-client:${{ env.SHA }}
+          kubectl set image deployments/worker-deployment worker=mcnickly/multi-worker:${{ env.SHA }}
